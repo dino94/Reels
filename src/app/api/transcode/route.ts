@@ -1,18 +1,20 @@
 import { spawn } from "node:child_process";
-import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { mkdtemp, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable, Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
+import { Readable } from "node:stream";
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { cleanupTemporaryDirectory, writeWebStreamToFile } from "@/lib/media";
+import { checkRateLimit, releaseRateLimit } from "@/lib/rate-limit";
+import { isStoragePathAllowed } from "@/lib/storage-path";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const MAX_INPUT_BYTES = Number(process.env.NEXT_PUBLIC_MAX_VIDEO_SIZE_MB || 500) * 1024 * 1024;
+const MAX_INPUT_BYTES = Number(process.env.MAX_VIDEO_SIZE_MB || process.env.NEXT_PUBLIC_MAX_VIDEO_SIZE_MB || 500) * 1024 * 1024;
 const FILE_TOO_LARGE = "La vidéo dépasse la taille maximale autorisée.";
 const FILE_EMPTY = "Le fichier vidéo est vide.";
 const INVALID_VIDEO = "Le fichier vidéo semble incomplet ou invalide (métadonnées MP4 manquantes). Réexporte ou retélécharge entièrement la vidéo, puis réessaie.";
@@ -28,28 +30,6 @@ class InvalidVideoError extends Error {
       : `Taille reçue : ${receivedBytes} octets ; taille sélectionnée : ${expectedBytes} octets.`;
     super(`${INVALID_VIDEO} ${sizes}`);
     this.name = "InvalidVideoError";
-  }
-}
-
-async function* readWebStreamChunks(body: ReadableStream<Uint8Array>) {
-  const reader = body.getReader();
-  let completed = false;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        completed = true;
-        return;
-      }
-      yield Buffer.from(value);
-    }
-  } finally {
-    if (!completed) {
-      await reader.cancel().catch((error: unknown) => {
-        console.error("Impossible d’annuler le téléchargement vidéo interrompu.", error);
-      });
-    }
-    reader.releaseLock();
   }
 }
 
@@ -93,7 +73,8 @@ function transcodeToH264(inputPath: string, outputPath: string, receivedBytes: n
           reject(new InvalidVideoError(receivedBytes, expectedBytes));
           return;
         }
-        reject(new Error(`FFmpeg n’a pas pu convertir cette vidéo en H.264.${stderr ? ` ${stderr.trim()}` : ""}`));
+        console.error("ffmpeg stderr:", stderr);
+        reject(new Error("FFmpeg n’a pas pu convertir cette vidéo en H.264."));
       }
     });
   });
@@ -104,6 +85,9 @@ export async function POST(request: Request) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Non autorisé." }, { status: 401 });
 
+  const rateLimit = checkRateLimit(user.id, "transcode");
+  if (!rateLimit.allowed) return NextResponse.json({ error: rateLimit.message }, { status: 429 });
+
   let requestBody: unknown;
   try {
     requestBody = await request.json();
@@ -113,8 +97,7 @@ export async function POST(request: Request) {
   const parsed = requestSchema.safeParse(requestBody);
   if (!parsed.success) return NextResponse.json({ error: "Fichier ou taille vidéo invalide." }, { status: 400 });
   const { storagePath, expectedSize } = parsed.data;
-  const pathParts = storagePath.split("/");
-  if (pathParts[0] !== user.id || pathParts.length < 2 || pathParts.some((part) => part === "." || part === "..")) {
+  if (!isStoragePathAllowed(storagePath, user.id)) {
     return NextResponse.json({ error: "Chemin de stockage invalide." }, { status: 400 });
   }
 
@@ -122,16 +105,19 @@ export async function POST(request: Request) {
     .from("videos")
     .createSignedUrl(storagePath, 300);
   if (signedUrlError || !signedSource?.signedUrl) {
-    return NextResponse.json({ error: signedUrlError?.message || "Vidéo source introuvable." }, { status: 404 });
+    if (signedUrlError) console.error("signed url failed:", signedUrlError.message);
+    return NextResponse.json({ error: "Vidéo source introuvable." }, { status: 404 });
   }
   let sourceResponse: Response;
   try {
     sourceResponse = await fetch(signedSource.signedUrl);
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : "Erreur réseau.";
-    return NextResponse.json({ error: `Impossible de récupérer la vidéo depuis Supabase : ${message}` }, { status: 502 });
+    console.error("source fetch failed:", message);
+    return NextResponse.json({ error: "Impossible de récupérer la vidéo depuis Supabase." }, { status: 502 });
   }
   if (!sourceResponse.ok || !sourceResponse.body) {
+    console.error("source download failed:", sourceResponse.status);
     return NextResponse.json({ error: "Impossible de télécharger la vidéo source depuis Supabase." }, { status: 502 });
   }
   const contentLengthHeader = sourceResponse.headers.get("content-length");
@@ -147,15 +133,7 @@ export async function POST(request: Request) {
     temporaryDirectory = await mkdtemp(join(tmpdir(), "football-video-transcode-"));
     const inputPath = join(temporaryDirectory, "input-video");
     const outputPath = join(temporaryDirectory, "output-h264.mp4");
-    let inputBytes = 0;
-    const sizeGuard = new Transform({
-      transform(chunk: Buffer, _encoding, callback) {
-        inputBytes += chunk.length;
-        if (inputBytes > MAX_INPUT_BYTES) callback(new Error(FILE_TOO_LARGE));
-        else callback(null, chunk);
-      },
-    });
-    await pipeline(Readable.from(readWebStreamChunks(sourceResponse.body)), sizeGuard, createWriteStream(inputPath));
+    const inputBytes = await writeWebStreamToFile(sourceResponse.body, inputPath, MAX_INPUT_BYTES);
     if (!inputBytes) throw new Error(FILE_EMPTY);
     if (inputBytes !== expectedSize) {
       throw new Error(`Le téléchargement depuis Supabase est incomplet : ${inputBytes} octets reçus au lieu de ${expectedSize}.`);
@@ -168,38 +146,17 @@ export async function POST(request: Request) {
       throw new Error("La vidéo convertie dépasse la taille maximale autorisée.");
     }
 
-    let cleanupStarted = false;
-    const cleanup = () => {
-      if (cleanupStarted) return;
-      cleanupStarted = true;
-      if (temporaryDirectory) {
-        void rm(temporaryDirectory, { recursive: true, force: true }).catch((error: unknown) => {
-          console.error("Impossible de nettoyer les fichiers temporaires de conversion.", error);
-        });
-      }
-    };
     const outputStream = createReadStream(outputPath);
-    outputStream.once("close", cleanup);
+    outputStream.once("close", () => {
+      cleanupTemporaryDirectory(temporaryDirectory, "conversion");
+      releaseRateLimit(user.id, "transcode");
+    });
     outputStream.once("error", (error) => {
       console.error("Erreur pendant l’envoi de la vidéo convertie.", error);
-      cleanup();
+      cleanupTemporaryDirectory(temporaryDirectory, "conversion");
+      releaseRateLimit(user.id, "transcode");
     });
-    const webOutputStream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        outputStream.on("data", (chunk: Buffer | string) => {
-          controller.enqueue(typeof chunk === "string" ? new TextEncoder().encode(chunk) : new Uint8Array(chunk));
-        });
-        outputStream.once("end", () => {
-          controller.close();
-          cleanup();
-        });
-        outputStream.once("error", (error) => controller.error(error));
-      },
-      cancel() {
-        outputStream.destroy();
-        cleanup();
-      },
-    });
+    const webOutputStream = Readable.toWeb(outputStream) as unknown as ReadableStream<Uint8Array>;
     return new Response(webOutputStream, {
       headers: {
         "Content-Type": "video/mp4",
@@ -209,15 +166,12 @@ export async function POST(request: Request) {
       },
     });
   } catch (cause) {
-    if (temporaryDirectory) {
-      await rm(temporaryDirectory, { recursive: true, force: true }).catch((error: unknown) => {
-        console.error("Impossible de nettoyer les fichiers temporaires après échec.", error);
-      });
-    }
+    releaseRateLimit(user.id, "transcode");
+    cleanupTemporaryDirectory(temporaryDirectory, "conversion");
     const message = cause instanceof Error ? cause.message : "Conversion vidéo impossible.";
     const status = cause instanceof InvalidVideoError ? 422
       : message === FILE_TOO_LARGE ? 413
-      : message === FILE_EMPTY ? 400
+        : message === FILE_EMPTY ? 400
           : 500;
     return NextResponse.json({ error: message }, { status });
   }
