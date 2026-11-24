@@ -13,6 +13,9 @@ export default async function VideoPage({ params }: { params: Promise<{ id: stri
   if (!video) notFound();
   const { data: analysis } = await supabase.from("analyses").select("*").eq("video_id", id).eq("user_id", user.id).order("created_at", { ascending: false }).limit(1).single();
   const { data: report } = await supabase.from("reports").select("id").eq("video_id", id).eq("user_id", user.id).eq("kind", "analysis").order("created_at", { ascending: false }).limit(1).single();
+  const { data: translationReport } = await supabase.from("reports").select("id,content")
+    .eq("video_id", id).eq("user_id", user.id).eq("kind", "translation")
+    .order("created_at", { ascending: false }).limit(1).maybeSingle();
   const { data: generatedVideo } = await supabase.from("reports").select("id,storage_path")
     .eq("video_id", id).eq("user_id", user.id).eq("kind", "explanation_video")
     .order("created_at", { ascending: false }).limit(1).single();
@@ -35,6 +38,8 @@ export default async function VideoPage({ params }: { params: Promise<{ id: stri
           thumbnailSeconds={thumbnailSeconds}
           generatedVideoId={generatedVideo?.id}
           generatedVideoUrl={signedVideo?.signedUrl}
+          initialTranslation={translationReport?.content?.replace(/^# Traduction anglaise\s*/, "").trim()}
+          translationReportId={translationReport?.id}
         />
       : <div className="mx-auto max-w-xl px-5 py-24 text-center">
           <p className="text-xs uppercase tracking-[.2em] text-accent">{video.status === "failed" ? "Analyse échouée" : "Analyse en attente"}</p>

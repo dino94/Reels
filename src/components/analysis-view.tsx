@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { ArrowLeft, Download, FileText, Film, LoaderCircle, WandSparkles } from "lucide-react";
+import { ArrowLeft, Download, FileText, Film, Languages, LoaderCircle, WandSparkles } from "lucide-react";
 import type { AnalysisRecord, VideoAnalysis, VideoRecord } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { formatDuration } from "@/lib/utils";
@@ -51,9 +51,9 @@ function timestamp(seconds: number) {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 }
 
-export function AnalysisView({ video, analysis, reportId, thumbnailUrls = [], thumbnailSeconds = [], generatedVideoId, generatedVideoUrl }: {
+export function AnalysisView({ video, analysis, reportId, thumbnailUrls = [], thumbnailSeconds = [], generatedVideoId, generatedVideoUrl, initialTranslation = "", translationReportId = "" }: {
   video: VideoRecord; analysis: AnalysisRecord; reportId?: string; thumbnailUrls?: string[]; thumbnailSeconds?: number[];
-  generatedVideoId?: string; generatedVideoUrl?: string;
+  generatedVideoId?: string; generatedVideoUrl?: string; initialTranslation?: string; translationReportId?: string;
 }) {
   const result = analysis.result as VideoAnalysis;
   const [remake, setRemake] = useState("");
@@ -63,10 +63,34 @@ export function AnalysisView({ video, analysis, reportId, thumbnailUrls = [], th
   const [highlightBusy, setHighlightBusy] = useState(false);
   const [highlightError, setHighlightError] = useState("");
   const [highlightStatus, setHighlightStatus] = useState("");
+  const [translation, setTranslation] = useState(initialTranslation);
+  const [translationReport, setTranslationReport] = useState(translationReportId);
+  const [translationBusy, setTranslationBusy] = useState(false);
+  const [translationError, setTranslationError] = useState("");
   const videoId = generatedVideoId;
   const videoUrl = generatedVideoUrl;
   const highlightClips = selectedHighlightClips(result, selectedHighlights, video.duration_seconds || 0);
   const selectedDuration = highlightClips.reduce((total, clip) => total + clip.end - clip.start, 0);
+
+  async function translateVideo() {
+    setTranslationBusy(true);
+    setTranslationError("");
+    try {
+      const response = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoId: video.id }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Traduction impossible.");
+      setTranslation(data.translation);
+      setTranslationReport(data.reportId);
+    } catch (cause) {
+      setTranslationError(cause instanceof Error ? cause.message : "Traduction impossible.");
+    } finally {
+      setTranslationBusy(false);
+    }
+  }
 
   async function generateRemake() {
     setBusy(true); setError("");
@@ -131,11 +155,25 @@ export function AnalysisView({ video, analysis, reportId, thumbnailUrls = [], th
       <p className="mt-2 text-sm text-muted">{formatDuration(video.duration_seconds)} · {video.width}×{video.height} · {video.fps ? `${video.fps.toFixed(1)} fps` : "fps inconnu"}</p></div>
       <div className="flex flex-wrap gap-2">
         {reportId && <a href={`/api/reports/${reportId}`}><Button variant="secondary"><Download size={16} /> VIDEO.md</Button></a>}
+        <Button variant="secondary" onClick={translateVideo} disabled={translationBusy || busy || highlightBusy}>
+          {translationBusy ? <LoaderCircle className="animate-spin" size={16} /> : <Languages size={16} />}
+          Traduire en anglais
+        </Button>
         <Button onClick={generateRemake} disabled={busy || highlightBusy}>{busy ? <LoaderCircle className="animate-spin" size={16} /> : <WandSparkles size={16} />} Generate Football Remake</Button>
       </div>
     </header>
     {error && <p role="alert" className="mb-4 text-sm text-red-400">{error}</p>}
     <p role="status" className="mb-4 rounded-xl border border-line bg-panel px-4 py-3 text-sm text-muted">La génération vidéo par API est temporairement suspendue pour éviter les frais. Les vidéos déjà enregistrées restent accessibles ci-dessous.</p>
+    {translationError && <p role="alert" className="mb-4 text-sm text-red-400">{translationError}</p>}
+    {translation && <SpotlightPanel className="mb-4 p-6">
+      <section>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div><h2 className="font-semibold">Traduction anglaise</h2><p className="mt-1 text-xs text-muted">Générée par Whisper</p></div>
+          {translationReport && <a href={`/api/reports/${translationReport}`}><Button variant="secondary"><Download size={16} /> TRANSLATION.md</Button></a>}
+        </div>
+        <p className="whitespace-pre-wrap text-sm leading-7 text-white/85">{translation}</p>
+      </section>
+    </SpotlightPanel>}
     <SpotlightPanel surface="rgba(59,212,255,0.05)" className="mt-4 border-accent/25 p-6">
       <section>
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">

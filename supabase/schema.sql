@@ -36,7 +36,7 @@ create table if not exists public.reports (
   analysis_id uuid references public.analyses(id) on delete set null,
   storage_path text not null,
   content text not null,
-  kind text not null default 'analysis' check (kind in ('analysis','remake','explanation_video')),
+  kind text not null default 'analysis' check (kind in ('analysis','remake','explanation_video','translation')),
   created_at timestamptz not null default now()
 );
 

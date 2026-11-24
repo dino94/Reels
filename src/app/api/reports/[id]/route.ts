@@ -22,7 +22,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   return new Response(data.content, {
     headers: {
       "Content-Type": "text/markdown; charset=utf-8",
-      "Content-Disposition": `attachment; filename="${data.kind === "remake" ? "REMAKE" : "VIDEO"}.md"`,
+      "Content-Disposition": `attachment; filename="${data.kind === "remake" ? "REMAKE" : data.kind === "translation" ? "TRANSLATION" : "VIDEO"}.md"`,
     },
   });
 }

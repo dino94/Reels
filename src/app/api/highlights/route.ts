@@ -185,7 +185,7 @@ export async function POST(request: Request) {
     const message = cause instanceof Error ? cause.message : "Création du montage impossible.";
     const status = cause instanceof NoAudioTrackError ? 422
       : message.includes("taille maximale") ? 413
-      : 500;
+        : 500;
     return NextResponse.json({ error: message }, { status });
   }
 }
