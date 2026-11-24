@@ -3,11 +3,14 @@ import { updateAccountPassword, updateProfileName } from "@/app/actions/auth";
 import { DashboardShell } from "@/components/dashboard-shell";
 import { SpotlightPanel } from "@/components/spotlight-panel";
 import { createClient } from "@/lib/supabase/server";
+import { authErrorMessage, authInfoMessage } from "@/lib/auth-messages";
 
 export default async function SettingsPage({ searchParams }: {
   searchParams: Promise<{ error?: string; message?: string }>;
 }) {
   const params = await searchParams;
+  const error = authErrorMessage(params.error);
+  const message = authInfoMessage(params.message);
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
@@ -26,8 +29,8 @@ export default async function SettingsPage({ searchParams }: {
         <p className="mt-2 text-sm text-muted">Modifiez votre pseudo et sécurisez votre compte.</p>
       </header>
 
-      {params.error && <p role="alert" className="mb-5 rounded-lg bg-red-500/10 p-3 text-sm text-red-300">{params.error}</p>}
-      {params.message && <p role="status" className="mb-5 rounded-lg bg-accent/10 p-3 text-sm text-accent">{params.message}</p>}
+      {error && <p role="alert" className="mb-5 rounded-lg bg-red-500/10 p-3 text-sm text-red-300">{error}</p>}
+      {message && <p role="status" className="mb-5 rounded-lg bg-accent/10 p-3 text-sm text-accent">{message}</p>}
       {profileError && <p role="alert" className="mb-5 rounded-lg bg-red-500/10 p-3 text-sm text-red-300">Le pseudo actuel n&apos;a pas pu être chargé.</p>}
 
       <SpotlightPanel className="p-5 sm:p-7">
